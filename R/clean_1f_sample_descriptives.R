@@ -1,0 +1,518 @@
+library(tidyverse)
+library(haven)
+library(labelled)
+library(modelsummary)
+library(tinytable)
+library(lavaan)
+library(survey)
+library(srvyr)
+library(WriteXLS)
+
+survey <- read_dta('01_Data/metadac_gwas.dta')
+
+sprintf('Number of observations in the survey dataset %d', nrow(survey))
+system2('wc', args = c('-l 01_Data/imputation_files/metadac_clean.fam'), stdout = TRUE)
+
+survey <- survey |> rename(yob = c_doby_dv)
+survey |> count(is.na(yob))
+summary(survey$yob)
+
+survey <- survey |> mutate(a_age = c_age_dv + which(letters == 'a') - 3, 
+                           b_age = c_age_dv + which(letters == 'b') - 3, 
+                           c_age = c_age_dv + which(letters == 'c') - 3, 
+                           d_age = c_age_dv + which(letters == 'd') - 3, 
+                           e_age = c_age_dv + which(letters == 'e') - 3, 
+                           f_age = c_age_dv + which(letters == 'f') - 3, 
+                           g_age = c_age_dv + which(letters == 'g') - 3, 
+                           h_age = c_age_dv + which(letters == 'h') - 3, 
+                           i_age = c_age_dv + which(letters == 'i') - 3, 
+                           j_age = c_age_dv + which(letters == 'j') - 3, 
+                           k_age = c_age_dv + which(letters == 'k') - 3, 
+                           l_age = c_age_dv + which(letters == 'l') - 3)
+survey |> select(matches('[a-z]_age$')) |> summary()
+
+# UK general election dates
+survey <- survey |> mutate(b_gedate = ymd('2010-05-06'), 
+                           g_gedate = ymd('2015-05-07'), 
+                           h_gedate = ymd('2017-06-08'), 
+                           i_gedate = ymd('2017-06-08'), 
+                           j_gedate = ymd('2017-06-08'), 
+                           k_gedate = ymd('2019-12-12'), 
+                           l_gedate = ymd('2019-12-12'))
+
+# Age at election
+survey <- survey |> mutate(b_age_election = if_else(month(b_gedate) <= 6, year(b_gedate) - yob - 1, year(b_gedate) - yob), 
+                           g_age_election = if_else(month(g_gedate) <= 6, year(g_gedate) - yob - 1, year(g_gedate) - yob), 
+                           h_age_election = if_else(month(h_gedate) <= 6, year(h_gedate) - yob - 1, year(h_gedate) - yob), 
+                           i_age_election = if_else(month(i_gedate) <= 6, year(i_gedate) - yob - 1, year(i_gedate) - yob), 
+                           j_age_election = if_else(month(j_gedate) <= 6, year(j_gedate) - yob - 1, year(j_gedate) - yob), 
+                           k_age_election = if_else(month(k_gedate) <= 6, year(k_gedate) - yob - 1, year(k_gedate) - yob), 
+                           l_age_election = if_else(month(l_gedate) <= 6, year(l_gedate) - yob - 1, year(l_gedate) - yob))
+
+survey |> select(ends_with('age_election')) |> summary()
+
+survey <- survey |> mutate(male = c_sex_dv == 1)
+survey |> count(c_sex_dv, male) |> mutate(c_sex_label = to_factor(c_sex_dv)) |> select(c_sex_dv, c_sex_label, male, n)
+survey <- survey |> select(-c_sex_dv)
+
+survey <- survey |> mutate(ethnicity = coalesce(c_ethn_dv, d_ethn_dv, e_ethn_dv, f_ethn_dv, g_ethn_dv, h_ethn_dv))
+survey <- survey |> select(-matches('[a-z]_ethn_dv'))
+
+survey <- survey |> mutate(hiqual = pmin(c_hiqual_dv, d_hiqual_dv, e_hiqual_dv, f_hiqual_dv, g_hiqual_dv, h_hiqual_dv, na.rm = TRUE))
+table(survey$c_hiqual_dv, survey$hiqual, useNA = 'ifany', deparse.level = 2)
+survey <- survey |> select(-matches('[a-z]_hiqual_dv'))
+
+survey <- survey |> mutate(degree = if_else(is.na(hiqual), NA, hiqual == 1))
+
+survey <- survey |> mutate(yedu = case_when(hiqual == 9 ~ 7, # Highest qual is none => 7 years
+                                            hiqual == 4 ~ 10, # Highest qual is GCSE => 10 years
+                                            hiqual == 3 ~ 13, # Highest qual is A-lev => 13 years
+                                            hiqual == 5 ~ 15, # Highest qual is other qual => 15 years
+                                            hiqual == 2 ~ 19, # Highest qual is other higher degree => 19 years
+                                            hiqual == 1 ~ 20, # Highest qual is degree => 20 years
+                                            TRUE ~ NA_real_ # Highest qual is missing => NA
+                                            ))
+survey <- survey |> mutate(yedu_std = scale(yedu, center = TRUE, scale = TRUE)[, 1])
+
+
+# Load predicted earnings data
+pred_earn <- read_dta('01_Data/predicted_earnings.dta')
+
+# Merge survey data with predicted earnings
+survey <- survey |> left_join(pred_earn %>% select(id, dpv_earn_hat, lwage_hat_45), by = c('id'))
+survey <- survey |> mutate(dpv_earn_std = scale(dpv_earn_hat, center = TRUE, scale = TRUE)[, 1])
+
+# Remove extra variables
+survey <- survey |> select(-matches('[a-z]_fimnlabgrs_dv'), -matches('[a-z]_jbhrs_dv'), -matches('[a-z]_fimngrs_dv'))
+
+survey <- survey %>%
+  mutate(a_ind_pol_support = if_else(!is.na(a_vote1) & a_vote1 %in% c(1, 2), a_vote1 == 1, NA),
+         b_ind_pol_support = if_else(!is.na(b_vote1) & b_vote1 %in% c(1, 2), b_vote1 == 1, NA),
+         c_ind_pol_support = if_else(!is.na(c_vote1) & c_vote1 %in% c(1, 2), c_vote1 == 1, NA), 
+         d_ind_pol_support = if_else(!is.na(d_vote1) & d_vote1 %in% c(1, 2), d_vote1 == 1, NA), 
+         e_ind_pol_support = if_else(!is.na(e_vote1) & e_vote1 %in% c(1, 2), e_vote1 == 1, NA), 
+         f_ind_pol_support = if_else(!is.na(f_vote1) & f_vote1 %in% c(1, 2), f_vote1 == 1, NA), 
+         g_ind_pol_support = if_else(!is.na(g_vote1) & g_vote1 %in% c(1, 2), g_vote1 == 1, NA), 
+         i_ind_pol_support = if_else(!is.na(i_vote1) & i_vote1 %in% c(1, 2), i_vote1 == 1, NA), 
+         j_ind_pol_support = if_else(!is.na(j_vote1) & j_vote1 %in% c(1, 2), j_vote1 == 1, NA), 
+         k_ind_pol_support = if_else(!is.na(k_vote1) & k_vote1 %in% c(1, 2), k_vote1 == 1, NA), 
+         l_ind_pol_support = if_else(!is.na(l_vote1) & l_vote1 %in% c(1, 2), l_vote1 == 1, NA), 
+         a_ind_pol_isclose = if_else(!is.na(a_vote2) & a_vote2 %in% c(1, 2), a_vote2 == 1, NA), 
+         b_ind_pol_isclose = if_else(!is.na(b_vote2) & b_vote2 %in% c(1, 2), b_vote2 == 1, NA), 
+         c_ind_pol_isclose = if_else(!is.na(c_vote2) & c_vote2 %in% c(1, 2), c_vote2 == 1, NA), 
+         d_ind_pol_isclose = if_else(!is.na(d_vote2) & d_vote2 %in% c(1, 2), d_vote2 == 1, NA), 
+         e_ind_pol_isclose = if_else(!is.na(e_vote2) & e_vote2 %in% c(1, 2), e_vote2 == 1, NA), 
+         f_ind_pol_isclose = if_else(!is.na(f_vote2) & f_vote2 %in% c(1, 2), f_vote2 == 1, NA), 
+         g_ind_pol_isclose = if_else(!is.na(g_vote2) & g_vote2 %in% c(1, 2), g_vote2 == 1, NA), 
+         i_ind_pol_isclose = if_else(!is.na(i_vote2) & i_vote2 %in% c(1, 2), i_vote2 == 1, NA), 
+         j_ind_pol_isclose = if_else(!is.na(j_vote2) & j_vote2 %in% c(1, 2), j_vote2 == 1, NA), 
+         k_ind_pol_isclose = if_else(!is.na(k_vote2) & k_vote2 %in% c(1, 2), k_vote2 == 1, NA), 
+         l_ind_pol_isclose = if_else(!is.na(l_vote2) & l_vote2 %in% c(1, 2), l_vote2 == 1, NA)) 
+survey <- survey %>%
+  mutate(a_ind_pol_aligned = a_ind_pol_support | a_ind_pol_isclose,
+         b_ind_pol_aligned = b_ind_pol_support | b_ind_pol_isclose,
+         c_ind_pol_aligned = c_ind_pol_support | c_ind_pol_isclose,
+         d_ind_pol_aligned = d_ind_pol_support | d_ind_pol_isclose,
+         e_ind_pol_aligned = e_ind_pol_support | e_ind_pol_isclose,
+         f_ind_pol_aligned = f_ind_pol_support | f_ind_pol_isclose,
+         g_ind_pol_aligned = g_ind_pol_support | g_ind_pol_isclose,
+         i_ind_pol_aligned = i_ind_pol_support | i_ind_pol_isclose,
+         j_ind_pol_aligned = j_ind_pol_support | j_ind_pol_isclose,
+         k_ind_pol_aligned = k_ind_pol_support | k_ind_pol_isclose,
+         l_ind_pol_aligned = l_ind_pol_support | l_ind_pol_isclose)
+
+survey <- survey %>%
+  mutate(b_ind_voted_high = if_else(!is.na(b_vote7) & b_vote7 %in% c(1, 2), b_vote7 == 1, NA),
+         g_ind_voted_high = if_else(!is.na(g_vote7) & g_vote7 %in% c(1, 2), g_vote7 == 1, NA),
+         h_ind_voted_high = if_else(!is.na(h_vote7) & h_vote7 %in% c(1, 2), h_vote7 == 1, NA),
+         i_ind_voted_high = if_else(!is.na(i_vote7) & i_vote7 %in% c(1, 2), i_vote7 == 1, NA),
+         j_ind_voted_high = if_else(!is.na(j_vote7) & j_vote7 %in% c(1, 2), j_vote7 == 1, NA),
+         k_ind_voted_high = if_else(!is.na(k_vote7) & k_vote7 %in% c(1, 2), k_vote7 == 1, NA),
+         l_ind_voted_high = if_else(!is.na(l_vote7) & l_vote7 %in% c(1, 2), l_vote7 == 1, NA))
+
+check_aligned <- lapply(letters[1:12], function(x) {
+  pol_var <- paste(x, 'ind_pol_aligned', sep = '_')
+  age_var <- paste(x, 'age', sep = '_')
+  sum_fml <- reformulate(paste(age_var, '(Mean + SD + Min + Max + N)', sep = ' * '),
+                         pol_var)
+
+  if ((pol_var %in% colnames(survey))) {
+    survey %>%
+      mutate(across(all_of(pol_var),
+                    ~factor(., levels = c(TRUE, FALSE), labels = c('Yes', 'No')))) %>%
+      datasummary(sum_fml, data = ., output = 'data.frame') %>%
+      pivot_longer(all_of(pol_var), names_to = c('wave', '.value'),
+                   names_pattern = '([a-z])_(.*)')
+  }
+})
+bind_rows(check_aligned) %>%
+  select(wave, ind_pol_aligned, everything()) %>%
+  tt()
+
+check_voted <- lapply(letters[1:12], function(x) {
+  pol_var <- paste(x, 'ind_voted_high', sep = '_')
+  age_var <- paste(x, 'age_election', sep = '_')
+  sum_fml <- reformulate(paste(age_var, '(Mean + SD + Min + Max + N)', sep = ' * '),
+                         pol_var)
+
+  if ((pol_var %in% colnames(survey))) {
+    survey %>%
+      mutate(across(all_of(pol_var),
+                    ~factor(., levels = c(TRUE, FALSE), labels = c('Yes', 'No')))) %>%
+      datasummary(sum_fml, data = ., output = 'data.frame') %>%
+      pivot_longer(all_of(pol_var), names_to = c('wave', '.value'),
+                   names_pattern = '([a-z])_(.*)')
+  }
+})
+bind_rows(check_voted) %>%
+  select(wave, ind_voted_high, everything()) %>%
+  tt()
+
+# Extract standardised residuals from each "election"
+reg_aligned <- lapply(letters[1:12], function(x) {
+  pol_var <- paste(x, 'ind_pol_aligned', sep = '_')
+  age_var <- paste(x, 'age', sep = '_')
+  age_polynomials <- paste(sprintf('I(%s^%d)', age_var, 1:3), collapse = '+')
+  pc_vars <- paste0('PC', 1:20, '_final')
+  covars <- paste(paste(pc_vars, collapse = '+'), # First 20 PCs
+                  age_polynomials, # 3rd degree polynom in age
+                  'male', 
+                  paste('male', paste0('(', age_polynomials, ')'), sep = '*'), 
+                  sep = '+')
+  
+  reg_fml <- reformulate(covars, pol_var)
+
+  # Assign individual id as rowname
+  survey_reg <- survey |> column_to_rownames('id')
+  
+  if ((pol_var %in% colnames(survey_reg))) {
+    reg_out <- lm(reg_fml, data = survey_reg)
+    reg_fit <- broom::augment(reg_out)
+    return(reg_fit |> select(.rownames, .std.resid) |> add_column(wave = x))
+  }
+})
+
+# Calculate average residual across "elections"
+avg_res_aligned <- reg_aligned |> 
+  bind_rows() |> 
+  summarise(avg_res_aligned = mean(.std.resid), .by = .rownames) |> 
+  rename(id = .rownames) |> 
+  mutate(id = as.numeric(id))
+
+# Add to the survey data
+survey <- survey |> left_join(avg_res_aligned, by = join_by(id))
+
+# Extract standardised residuals from each "election"
+reg_voted_high <- lapply(letters[1:12], function(x) {
+  pol_var <- paste(x, 'ind_voted_high', sep = '_')
+  age_var <- paste(x, 'age_election', sep = '_')
+  age_polynomials <- paste(sprintf('I(%s^%d)', age_var, 1:3), collapse = '+')
+  pc_vars <- paste0('PC', 1:20, '_final')
+  covars <- paste(paste(pc_vars, collapse = '+'), # First 20 PCs
+                  age_polynomials, # 3rd degree polynom in age
+                  'male', 
+                  paste('male', paste0('(', age_polynomials, ')'), sep = '*'), 
+                  sep = '+')
+  
+  reg_fml <- reformulate(covars, pol_var)
+
+  # Assign individual id as rowname
+  survey_reg <- survey |> column_to_rownames('id')
+  
+  if ((pol_var %in% colnames(survey_reg))) {
+    reg_out <- lm(reg_fml, data = survey_reg)
+    reg_fit <- broom::augment(reg_out)
+    return(reg_fit |> select(.rownames, .std.resid) |> add_column(wave = x))
+  }
+})
+
+# Calculate average residual across "elections"
+avg_res_voted_high <- reg_voted_high |> 
+  bind_rows() |> 
+  summarise(avg_res_voted_high = mean(.std.resid), .by = .rownames) |> 
+  rename(id = .rownames) |> 
+  mutate(id = as.numeric(id))
+
+# Add to the survey data
+survey <- survey |> left_join(avg_res_voted_high, by = join_by(id))
+
+cons_fun <- function(x) if_else(!is.na(x) & x != 96, x == 1, NA)
+lab_fun <- function(x) if_else(!is.na(x) & x != 96, x == 2, NA)
+libdem_fun <- function(x) if_else(!is.na(x) & x != 96, x == 3, NA)
+other_fun <- function(x) if_else(!is.na(x) & x != 96, x > 3, NA)
+
+# Party would vote for tomorrow
+survey <- survey %>% 
+  mutate(across(ends_with('vote3'), 
+                list(cons_tom = cons_fun, lab_tom = lab_fun, 
+                     libdem_tom = libdem_fun, other_tom = other_fun), 
+                .names = '{.col}_{.fn}')) |> 
+  rename_with(str_remove_all, matches('vote3.*tom'), '_vote3')
+
+# Party closest to
+survey <- survey |> 
+  mutate(across(ends_with('vote4'), 
+                list(cons_closest = cons_fun, lab_closest = lab_fun, 
+                     libdem_closest = libdem_fun, other_closest = other_fun), 
+                .names = '{.col}_{.fn}')) |> 
+  rename_with(str_remove_all, matches('vote4.*closest'), '_vote4')
+
+# Party alignment (combining the two above)
+survey <- survey |> mutate(a_cons_aligned = pmax(a_cons_tom, a_cons_closest, na.rm = TRUE), 
+                           b_cons_aligned = pmax(b_cons_tom, b_cons_closest, na.rm = TRUE), 
+                           c_cons_aligned = pmax(c_cons_tom, c_cons_closest, na.rm = TRUE), 
+                           d_cons_aligned = pmax(d_cons_tom, d_cons_closest, na.rm = TRUE), 
+                           e_cons_aligned = pmax(e_cons_tom, e_cons_closest, na.rm = TRUE), 
+                           f_cons_aligned = pmax(f_cons_tom, f_cons_closest, na.rm = TRUE), 
+                           g_cons_aligned = pmax(g_cons_tom, g_cons_closest, na.rm = TRUE), 
+                           i_cons_aligned = pmax(i_cons_tom, i_cons_closest, na.rm = TRUE), 
+                           j_cons_aligned = pmax(j_cons_tom, j_cons_closest, na.rm = TRUE), 
+                           k_cons_aligned = pmax(k_cons_tom, k_cons_closest, na.rm = TRUE), 
+                           l_cons_aligned = pmax(l_cons_tom, l_cons_closest, na.rm = TRUE), 
+                           a_lab_aligned = pmax(a_lab_tom, a_lab_closest, na.rm = TRUE), 
+                           b_lab_aligned = pmax(b_lab_tom, b_lab_closest, na.rm = TRUE), 
+                           c_lab_aligned = pmax(c_lab_tom, c_lab_closest, na.rm = TRUE), 
+                           d_lab_aligned = pmax(d_lab_tom, d_lab_closest, na.rm = TRUE), 
+                           e_lab_aligned = pmax(e_lab_tom, e_lab_closest, na.rm = TRUE), 
+                           f_lab_aligned = pmax(f_lab_tom, f_lab_closest, na.rm = TRUE), 
+                           g_lab_aligned = pmax(g_lab_tom, g_lab_closest, na.rm = TRUE), 
+                           i_lab_aligned = pmax(i_lab_tom, i_lab_closest, na.rm = TRUE), 
+                           j_lab_aligned = pmax(j_lab_tom, j_lab_closest, na.rm = TRUE), 
+                           k_lab_aligned = pmax(k_lab_tom, k_lab_closest, na.rm = TRUE), 
+                           l_lab_aligned = pmax(l_lab_tom, l_lab_closest, na.rm = TRUE), 
+                           a_libdem_aligned = pmax(a_libdem_tom, a_libdem_closest, na.rm = TRUE), 
+                           b_libdem_aligned = pmax(b_libdem_tom, b_libdem_closest, na.rm = TRUE), 
+                           c_libdem_aligned = pmax(c_libdem_tom, c_libdem_closest, na.rm = TRUE), 
+                           d_libdem_aligned = pmax(d_libdem_tom, d_libdem_closest, na.rm = TRUE), 
+                           e_libdem_aligned = pmax(e_libdem_tom, e_libdem_closest, na.rm = TRUE), 
+                           f_libdem_aligned = pmax(f_libdem_tom, f_libdem_closest, na.rm = TRUE), 
+                           g_libdem_aligned = pmax(g_libdem_tom, g_libdem_closest, na.rm = TRUE), 
+                           i_libdem_aligned = pmax(i_libdem_tom, i_libdem_closest, na.rm = TRUE), 
+                           j_libdem_aligned = pmax(j_libdem_tom, j_libdem_closest, na.rm = TRUE), 
+                           k_libdem_aligned = pmax(k_libdem_tom, k_libdem_closest, na.rm = TRUE), 
+                           l_libdem_aligned = pmax(l_libdem_tom, l_libdem_closest, na.rm = TRUE), 
+                           a_other_aligned = pmax(a_other_tom, a_other_closest, na.rm = TRUE), 
+                           b_other_aligned = pmax(b_other_tom, b_other_closest, na.rm = TRUE), 
+                           c_other_aligned = pmax(c_other_tom, c_other_closest, na.rm = TRUE), 
+                           d_other_aligned = pmax(d_other_tom, d_other_closest, na.rm = TRUE), 
+                           e_other_aligned = pmax(e_other_tom, e_other_closest, na.rm = TRUE), 
+                           f_other_aligned = pmax(f_other_tom, f_other_closest, na.rm = TRUE), 
+                           g_other_aligned = pmax(g_other_tom, g_other_closest, na.rm = TRUE), 
+                           i_other_aligned = pmax(i_other_tom, i_other_closest, na.rm = TRUE), 
+                           j_other_aligned = pmax(j_other_tom, j_other_closest, na.rm = TRUE), 
+                           k_other_aligned = pmax(k_other_tom, k_other_closest, na.rm = TRUE), 
+                           l_other_aligned = pmax(l_other_tom, l_other_closest, na.rm = TRUE))
+
+# Party voted for in the last general election
+survey <- survey %>% 
+  mutate(across(ends_with('vote8'), 
+                list(cons_voted_high = cons_fun, lab_voted_high = lab_fun, 
+                     libdem_voted_high = libdem_fun, other_voted_high = other_fun), 
+                .names = '{.col}_{.fn}')) |> 
+  rename_with(str_remove_all, matches('vote8.*voted_high'), '_vote8')
+
+survey <- survey |> 
+  mutate(ever_cons_aligned = pmax(a_cons_aligned, b_cons_aligned, c_cons_aligned, 
+                                  d_cons_aligned, e_cons_aligned, f_cons_aligned, 
+                                  g_cons_aligned, i_cons_aligned, j_cons_aligned, 
+                                  k_cons_aligned, l_cons_aligned, na.rm = TRUE), 
+         ever_lab_aligned = pmax(a_lab_aligned, b_lab_aligned, c_lab_aligned, d_lab_aligned, 
+                                 e_lab_aligned, f_lab_aligned, g_lab_aligned, i_lab_aligned, 
+                                 j_lab_aligned, k_lab_aligned, l_lab_aligned, na.rm = TRUE), 
+         ever_libdem_aligned = pmax(a_libdem_aligned, b_libdem_aligned, c_libdem_aligned, 
+                                    d_libdem_aligned, e_libdem_aligned, f_libdem_aligned, 
+                                    g_libdem_aligned, i_libdem_aligned, j_libdem_aligned, 
+                                    k_libdem_aligned, l_libdem_aligned, na.rm = TRUE), 
+         ever_other_aligned = pmax(a_other_aligned, b_other_aligned, c_other_aligned, 
+                                   d_other_aligned, e_other_aligned, f_other_aligned, 
+                                   g_other_aligned, i_other_aligned, j_other_aligned, 
+                                   k_other_aligned, l_other_aligned, na.rm = TRUE), 
+         ever_cons_voted_high = pmax(b_cons_voted_high, g_cons_voted_high, h_cons_voted_high, 
+                                     i_cons_voted_high, j_cons_voted_high, k_cons_voted_high, 
+                                     l_cons_voted_high, na.rm = TRUE), 
+         ever_lab_voted_high = pmax(b_lab_voted_high, g_lab_voted_high, h_lab_voted_high, 
+                                    i_lab_voted_high, j_lab_voted_high, k_lab_voted_high, 
+                                    l_lab_voted_high, na.rm = TRUE), 
+         ever_libdem_voted_high = pmax(b_libdem_voted_high, g_libdem_voted_high, 
+                                       h_libdem_voted_high, i_libdem_voted_high, 
+                                       j_libdem_voted_high, k_libdem_voted_high, 
+                                       l_libdem_voted_high, na.rm = TRUE), 
+         ever_other_voted_high = pmax(b_other_voted_high, g_other_voted_high, 
+                                      h_other_voted_high, i_other_voted_high, 
+                                      j_other_voted_high, k_other_voted_high, 
+                                      l_other_voted_high, na.rm = TRUE))
+
+datasummary(ever_cons_aligned + ever_lab_aligned + ever_libdem_aligned + 
+                ever_other_aligned + ever_cons_voted_high + ever_lab_voted_high + 
+                ever_libdem_voted_high + ever_other_voted_high ~ Mean + SD + N, 
+            data = survey)
+
+# Load and basic cleaning
+df <- read_dta('01_Data/c_indresp.dta')
+df <- df |> filter(between(c_doby_dv, 1950, 1990), c_sex_dv != 0, c_indinub_xw != 0)
+df <- df |> mutate(c_cgnssc6_dv = pmax(c_cgns1sc6_dv, c_cgns2sc6_dv, na.rm = TRUE))
+df <- df |> mutate(c_cgwri_dv = if_else(c_cgwri_dv < 0, NA, c_cgwri_dv), 
+                   c_cgwrd_dv = if_else(c_cgwrd_dv < 0, NA, c_cgwrd_dv), 
+                   c_cgs7cs_dv = if_else(c_cgs7cs_dv < 0, NA, c_cgs7cs_dv), 
+                   c_cgnssc6_dv = if_else(c_cgnssc6_dv < 0, NA, c_cgnssc6_dv), 
+                   c_cgvfc_dv = if_else(c_cgvfc_dv < 0, NA, c_cgvfc_dv), 
+                   c_cgna_dv = if_else(c_cgna_dv < 0, NA, c_cgna_dv), 
+                   across(c(c_cgwri_dv, c_cgwrd_dv, c_cgs7cs_dv, c_cgnssc6_dv, 
+                            c_cgvfc_dv, c_cgna_dv), as.numeric))
+df <- df |> mutate(c_big5a_dv = if_else(c_big5a_dv < 0, NA, c_big5a_dv), 
+                   c_big5c_dv = if_else(c_big5c_dv < 0, NA, c_big5c_dv), 
+                   c_big5e_dv = if_else(c_big5e_dv < 0, NA, c_big5e_dv), 
+                   c_big5n_dv = if_else(c_big5n_dv < 0, NA, c_big5n_dv), 
+                   c_big5o_dv = if_else(c_big5o_dv < 0, NA, c_big5o_dv), 
+                   across(contains('big5'), as.numeric))
+
+# Declare survey design object (so statistics are weighted and clustered accordingly)
+df_svd <- df |> as_survey_design(ids = c_psu, strata = c_strata, weights = c_indinub_xw)
+
+# Standardise the individual scores by cohort and gender
+df_svd <- df_svd |>
+  group_by(c_doby_dv, c_sex_dv) |> 
+  mutate(c_cgwri_mean = survey_mean(c_cgwri_dv, na.rm = TRUE)[, 1],
+         c_cgwrd_mean = survey_mean(c_cgwrd_dv, na.rm = TRUE)[, 1], 
+         c_cgs7cs_mean = survey_mean(c_cgs7cs_dv, na.rm = TRUE)[, 1], 
+         c_cgnssc6_mean = survey_mean(c_cgnssc6_dv, na.rm = TRUE)[, 1], 
+         c_cgvfc_mean = survey_mean(c_cgvfc_dv, na.rm = TRUE)[, 1], 
+         c_cgna_mean = survey_mean(c_cgna_dv, na.rm = TRUE)[, 1], 
+         c_cgwri_sd = survey_sd(c_cgwri_dv, na.rm = TRUE)[, 1],
+         c_cgwrd_sd = survey_sd(c_cgwrd_dv, na.rm = TRUE)[, 1], 
+         c_cgs7cs_sd = survey_sd(c_cgs7cs_dv, na.rm = TRUE)[, 1], 
+         c_cgnssc6_sd = survey_sd(c_cgnssc6_dv, na.rm = TRUE)[, 1], 
+         c_cgvfc_sd = survey_sd(c_cgvfc_dv, na.rm = TRUE)[, 1], 
+         c_cgna_sd = survey_sd(c_cgna_dv, na.rm = TRUE)[, 1], 
+         c_big5a_mean = survey_mean(c_big5a_dv, na.rm = TRUE)[, 1], 
+         c_big5c_mean = survey_mean(c_big5c_dv, na.rm = TRUE)[, 1], 
+         c_big5e_mean = survey_mean(c_big5e_dv, na.rm = TRUE)[, 1], 
+         c_big5n_mean = survey_mean(c_big5n_dv, na.rm = TRUE)[, 1], 
+         c_big5o_mean = survey_mean(c_big5o_dv, na.rm = TRUE)[, 1], 
+         c_big5a_sd = survey_sd(c_big5a_dv, na.rm = TRUE)[, 1], 
+         c_big5c_sd = survey_sd(c_big5c_dv, na.rm = TRUE)[, 1], 
+         c_big5e_sd = survey_sd(c_big5e_dv, na.rm = TRUE)[, 1], 
+         c_big5n_sd = survey_sd(c_big5n_dv, na.rm = TRUE)[, 1], 
+         c_big5o_sd = survey_sd(c_big5o_dv, na.rm = TRUE)[, 1]) |> 
+  ungroup()
+df_svd <- df_svd |> mutate(c_cgwri_std = (c_cgwri_dv - c_cgwri_mean) / c_cgwri_sd, 
+                           c_cgwrd_std = (c_cgwrd_dv - c_cgwrd_mean) / c_cgwrd_sd, 
+                           c_cgs7cs_std = (c_cgs7cs_dv - c_cgs7cs_mean) / c_cgs7cs_sd, 
+                           c_cgnssc6_std = (c_cgnssc6_dv - c_cgnssc6_mean) / c_cgnssc6_sd, 
+                           c_cgvfc_std = (c_cgvfc_dv - c_cgvfc_mean) / c_cgvfc_sd, 
+                           c_cgna_std = (c_cgna_dv - c_cgna_mean) / c_cgna_sd, 
+                           c_big5a_std = (c_big5a_dv - c_big5a_mean) / c_big5a_sd, 
+                           c_big5c_std = (c_big5c_dv - c_big5c_mean) / c_big5c_sd, 
+                           c_big5e_std = (c_big5e_dv - c_big5e_mean) / c_big5e_sd, 
+                           c_big5n_std = (c_big5n_dv - c_big5n_mean) / c_big5n_sd, 
+                           c_big5o_std = (c_big5o_dv - c_big5o_mean) / c_big5o_sd)
+
+
+### Cognitive variables ----
+# The dataset contians following variables with counts of correct answers:
+# - c_cgwri_dv: Immediate word recall test
+# - c_cgwrd_dv: Delayed word recall test
+# - c_cgs7cs_dv: Serial 7 subtractions (count of correct subtractions)
+# - c_cgns1sc6_dv and c_cgns2sc6_dv: Number series
+#   These are mutually exclusive: if first is non-missing, second is missing and
+#   vice versa. So, we can combine these two variables into single var.
+# - c_cgvfc_dv: Verbal fluency
+# - c_cgna_dv: Numeric ability test
+
+# Combine two number series scores into single variable
+survey <- survey %>% mutate(c_cgnssc6_dv = pmax(c_cgns1sc6_dv, c_cgns2sc6_dv, na.rm = TRUE))
+survey <- survey %>% set_variable_labels(c_cgnssc6_dv = 'Number series')
+
+# Standardise cognitive test scores
+survey <- survey %>% 
+  mutate(across(c(c_cgwri_dv, c_cgwrd_dv, c_cgs7cs_dv, c_cgnssc6_dv, c_cgvfc_dv, c_cgna_dv), 
+                ~scale(., center = TRUE, scale = TRUE)[, 1],
+                .names = '{.col}_std'), .by = c(yob, male))
+survey <- survey |> rename_with(str_remove_all, matches('c_cg.*_dv_std'), '_dv')
+
+# Confirmatory factor analysis (in the full survey)
+# This is done using lavaan package. More detailed description of the package
+# and syntax can be found here: https://lavaan.ugent.be/tutorial/sem.html
+cfa_model <- '
+# Measurement model
+Mem =~ c_cgwri_std + c_cgwrd_std
+Nmb =~ c_cgs7cs_std + c_cgna_std
+G =~ c_cgnssc6_std + c_cgvfc_std
+# Regressions
+Mem + Nmb ~ G
+# Covariances
+Mem ~~ 0*Nmb
+'
+
+cfa_res <- sem(cfa_model, data = df_svd |> as_tibble(), 
+               sampling.weights = 'c_indinub_xw', cluster = 'c_psu')
+summary(cfa_res)
+
+# Extract predicted latent scores and merge with individual IDs
+survey_temp <- survey |> 
+  drop_na(c_cgwri_std, c_cgwrd_std, c_cgs7cs_std, c_cgnssc6_std, c_cgvfc_std, c_cgna_std)
+cfa_pred <- lavPredict(cfa_res, survey_temp |> column_to_rownames('id'))
+cfa_pred <- cfa_pred %>% as_tibble() %>% add_column(id = survey_temp$id)
+cfa_pred <- cfa_pred %>% rename(mem_score = Mem, nmb_score = Nmb, gscore = G)
+
+# Merge predicted cognitive scores to main dataset
+survey <- survey %>% left_join(cfa_pred, by = 'id')
+
+# Compute mean and standard deviation of the scores
+survey <- survey %>%
+  mutate(across(ends_with('score'),
+                ~ scale(., scale = TRUE, center = TRUE)[, 1],
+                .names = '{.col}_std'), 
+         .by = c(yob, male))
+survey <- survey %>% set_variable_labels(mem_score_std = "Standardised content memory score",
+                                         nmb_score_std = "Standardised number score",
+                                         gscore_std = "Standardsed intelligence score")
+
+# Standardise input scores
+survey <- survey %>% 
+  mutate(across(contains('big5'), ~scale(., center = TRUE, scale = TRUE)[, 1],
+                .names = '{.col}_std'), .by = c(yob, male))
+survey <- survey |> rename_with(str_remove_all, matches('big5.*dv_std'), '_dv')
+
+# Run PCA on full sample
+big5_pca <- svyprcomp(~c_big5a_std + c_big5c_std + c_big5e_std + c_big5n_std + c_big5o_std, 
+                      design = df_svd, scale = TRUE, center = TRUE)
+summary(big5_pca)
+
+# Compute big5 score (given the PCA analysis in full survey)
+survey_pc_predict <- predict(big5_pca, survey |> column_to_rownames('id'))
+survey_pc_predict <- survey_pc_predict |> as_tibble(rownames = 'id')
+survey_pc_predict <- survey_pc_predict |> mutate(PC1 = -PC1, id = as.numeric(id))
+survey_pc_predict <- survey_pc_predict |> select(id, big5_score = PC1)
+survey <- survey |> left_join(survey_pc_predict, by = join_by(id))
+
+# Standardise the output score
+survey <- survey %>% 
+  mutate(big5_score_std = scale(big5_score, scale = TRUE, center = TRUE)[, 1],
+         .by = c(yob, sex))
+survey <- survey %>% set_variable_labels(big5_score = 'Big5 score',
+                                         big5_score_std = 'Standardised Big5 score')
+
+# Select vars of interest
+survey_out <- survey |> 
+  select(IID = id, yob, male, ethnicity, matches('[a-z]_age$'), 
+         matches('[a-z]_age_election$'), hiqual, degree, yedu, yedu_std, 
+         dpv_earn_std, matches('[a-z]_ind_pol_aligned'), avg_res_aligned, 
+         matches('[a-z]_ind_voted_high'), avg_res_voted_high, 
+         matches('[a-z]_cons_aligned'), ever_cons_aligned, 
+         matches('[a-z]_lab_aligned'), ever_lab_aligned, 
+         matches('[a-z]_libdem_aligned'), ever_libdem_aligned, 
+         matches('[a-z]_other_aligned'), ever_other_aligned, 
+         matches('[a-z]_cons_voted_high'), ever_cons_voted_high, 
+         matches('[a-z]_lab_voted_high'), ever_lab_voted_high, 
+         matches('[a-z]_libdem_voted_high'), ever_libdem_voted_high, 
+         matches('[a-z]_other_voted_high'), ever_other_voted_high, 
+         c_cgwri_dv, c_cgwrd_dv, c_cgs7cs_dv, c_cgnssc6_dv, c_cgvfc_dv, c_cgna_dv, 
+         c_cgwri_std, c_cgwrd_std, c_cgs7cs_std, c_cgnssc6_std, c_cgvfc_std, c_cgna_std, 
+         mem_score, mem_score_std, nmb_score, nmb_score_std, gscore, gscore_std, 
+         c_big5a_dv, c_big5e_dv, c_big5c_dv, c_big5n_dv, c_big5o_dv, 
+         c_big5a_std, c_big5c_std, c_big5e_std, c_big5n_std, c_big5o_std, 
+         big5_score, big5_score_std, matches('PC[0-9]+_final'), starts_with('GRMindp'))
+
+# Save to white-space-delimited file
+survey_out |> WriteXLS('01_Data/METADAC.descriptives.20241220.xls')
