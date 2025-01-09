@@ -1,0 +1,179 @@
+---
+title: Filter sample members based on survey variables
+author: Nurfatima Jandarova
+date: 4 December 2024
+knitr:
+  opts_knit:
+    root.dir: '~/Google Drive/My Drive/Research/GWAS Political Data/'
+---
+
+The analysis plan specifies that sample members should
+
+-   be eligible to vote at least once (*based on age, residence/citizenship etc*)
+-   have non-missing covariates (*genotyping/imputation batch, age and sex*)
+
+```{r}
+#| label: load-packages
+
+library(tidyverse)
+library(haven)
+library(labelled)
+```
+
+First, let's load the data. Our survey data comes in two parts: old and new. Old survey data dates to 2020 when we first got access to the data and contains main variables including cognitive test scores, education and family background. We received new survey data in 2023 after asking for variables related to political participation and affiliation. Both datasets use [same]{.underline} individual ID variable, so we can easily merge them.
+
+```{r}
+#| label: load-data
+
+survey_old <- read_dta('01_Data/MDAC-2019-0004-03E-ICHINO_20200406/MDAC-2019-0004-03E-ICHINO_sendout.dta')
+survey_new <- read_dta('01_Data/MDAC-2019-0004-03E-ICHINO_20230623/MDAC-2019-0004-03E-ICHINO_202306_sendout.dta')
+survey <- survey_old %>% left_join(survey_new, by = 'id', suffix = c('', '_new'))
+```
+
+## Voting eligibility
+
+Voting eligibility criteria: age $\geq 18$ and being a citizen.
+
+### Citizenship
+
+The dataset contains citizenship indicators from multiple waves:
+
+```{r}
+look_for(survey, 'citizen', label = TRUE, values = FALSE, details = 'basic')
+```
+
+However, these indicators are missing for a very large proportion of the sample. Combining these indicators, by taking the highest value ever observed, still leaves overwhelming majority of observations missing.
+
+```{r}
+#| warning: false
+
+survey |> 
+  mutate(ever_citizen = pmax(a_citzn1, b_citzn1, c_citzn1, d_citzn1, 
+                             e_citzn1, f_citzn1, g_citzn1, h_citzn1, 
+                             na.rm = TRUE)) |> 
+  count(ever_citizen) |> 
+  mutate(freq = n / sum(n) * 100)
+```
+
+Therefore, I simply assume that citizenship requirement is satisfied.
+
+### Age
+
+Our dataset contains age as of wave 3.
+
+```{r}
+survey |> select(contains('_age')) |> var_label()
+val_labels(survey$c_age_dv)
+```
+
+```{r}
+#| warning: false
+
+survey |> 
+  ggplot() + 
+  geom_histogram(aes(x = c_age_dv), binwidth = 1) + 
+  geom_vline(xintercept = c(15, 91), colour = 'red', linetype = 'dashed') + 
+  theme_minimal()
+```
+
+I can use this information to infer their ages in other waves.
+
+Voting outcomes were collected in multiple waves
+
+```{r}
+survey |> select(ends_with('vote7')) |> var_label()
+```
+
+Voting indicators also have an option for voting ineligibility
+
+```{r}
+survey |> count(b_vote7)
+```
+
+Therefore, for each individual I can construct eligibility indicator based on `vote7` variable and age.
+
+```{r}
+#| label: voting-eligibility
+
+# Eligibility per wave
+survey <- survey |> 
+  mutate(b_eligible = if_else(!is.na(b_vote7), b_vote7 != 3, 
+                              c_age_dv + which(letters == 'b') - 3 >= 18), 
+         g_eligible = if_else(!is.na(g_vote7), g_vote7 != 3, 
+                              c_age_dv + which(letters == 'g') - 3 >= 18), 
+         h_eligible = if_else(!is.na(h_vote7), h_vote7 != 3, 
+                              c_age_dv + which(letters == 'h') - 3 >= 18), 
+         i_eligible = if_else(!is.na(i_vote7), i_vote7 != 3, 
+                              c_age_dv + which(letters == 'i') - 3 >= 18), 
+         j_eligible = if_else(!is.na(j_vote7), j_vote7 != 3, 
+                              c_age_dv + which(letters == 'j') - 3 >= 18), 
+         k_eligible = if_else(!is.na(k_vote7), k_vote7 != 3, 
+                              c_age_dv + which(letters == 'k') - 3 >= 18), 
+         l_eligible = if_else(!is.na(l_vote7), l_vote7 != 3, 
+                              c_age_dv + which(letters == 'l') - 3 >= 18))
+
+# Ever eligible
+survey <- survey |> mutate(ever_eligible = pmax(b_eligible, g_eligible, 
+                                               h_eligible, i_eligible, 
+                                               j_eligible, k_eligible, 
+                                               l_eligible, na.rm = TRUE))
+
+survey |> count(ever_eligible)
+```
+
+`r survey |> filter(is.na(ever_eligible)) |> nrow()` observations are missing because their age information in wave 3 (`c_age_dv`) is missing and they have never responded to any of the voting questions.
+
+I keep only the indivduals who were eligible to vote at least once (i.e, dropping those who were never eligible and those with missing age/voting):
+
+```{r}
+#| label: filter-eligibility
+
+survey <- survey |> filter(ever_eligible == 1)
+survey |> nrow()
+```
+
+## Non-missing covariates
+
+The dataset does not contain any information on genotyping batch. The data description by [Benzeval, Aguirre and Kumari (2023)](https://onlinelibrary.wiley.com/doi/abs/10.1111/1475-5890.12354) also does not suggest batched genotyping. Furthermore, the available genetic data contains a little more than 500,000 variants, which suggests we only have genotyped calls.
+
+```{r}
+system('wc -l 01_Data/MDAC-2019-0004-03E-ICHINO_20200406/MDAC-2019-0004-03E-ICHINO_sendout.bim')
+```
+
+Therefore, covariate filters are based on missing age and sex variables. There are `r survey |> filter(is.na(c_age_dv), is.na(c_sex_dv)) |> nrow()` observations with missing[^1] age or gender.
+
+[^1]: Even though survey methodology codes missing values with special negative values, the survey data released as part of the genotype data codes all missing values as actually missing (or NA). Therefore, it is enough to check for missingness using `is.na()` function.
+
+```{r}
+survey |> count(is.na(c_age_dv), is.na(c_sex_dv))
+```
+
+```{r}
+#| label: filter-covariates
+
+survey <- survey |> filter(!is.na(c_age_dv), !is.na(c_sex_dv))
+```
+
+## Save
+
+```{r}
+#| label: save-dta
+
+write_dta(survey, '01_Data/metadac_work.dta')
+```
+
+In addition to saving the Stata data file, I also save list of remaining individuals. PLINK requires sample ID lists to be tab-delimited with two columns (family ID in first column and individual ID in second column). The genotype fam file uses `id` variable as both family and individual ID column.
+
+```{r}
+system('head 01_Data/MDAC-2019-0004-03E-ICHINO_20200406/MDAC-2019-0004-03E-ICHINO_sendout.fam')
+```
+
+```{r}
+#| label: save-individual-list
+
+survey |> 
+  select(fam_id = id) |> 
+  mutate(ind_id = fam_id) |> 
+  write_delim('01_Data/QC_files/sample_covar_pass.txt', 
+              delim = '\t', col_names = FALSE)
+```

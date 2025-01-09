@@ -1,0 +1,175 @@
+---
+title: Filter sample members based on genetic ancestry
+author: Nurfatima Jandarova
+date: 4 December 2024
+knitr:
+  opts_knit:
+    root.dir: '~/Google Drive/My Drive/Research/GWAS Political Data/'
+---
+
+```{r}
+#| label: load-packages
+
+library(tidyverse)
+library(haven)
+library(labelled)
+```
+
+```{r}
+#| label: plink
+
+plink <- '09_Software/plink_mac_20241022/plink'
+system2(plink, args = c('--version'))
+
+plink2 <- '09_Software/plink2'
+system2(plink2, args = c('--version'))
+```
+
+```{r}
+#| label: orig-data
+
+gtp_data <- '01_Data/MDAC-2019-0004-03E-ICHINO_20200406/MDAC-2019-0004-03E-ICHINO_sendout'
+```
+
+Identify genetic ancestry using PCA. Previously, have already applied sample filters based on [availability of survey variables](clean_1a_sample_variables.qmd) and [quality of genotype data](clean_1b_sample_genotypes.qmd).
+
+## Run PCA
+
+```{r}
+#| label: filter-ld
+
+system2(plink2, 
+        args = c('--bfile', gtp_data, 
+                 '--keep', '01_Data/QC_files/sample_gtp_pass.txt', 
+                 '--mind', 0.05, 
+                 '--geno', 0.05, 
+                 '--maf', 0.01, 
+                 '--max-maf', 0.99, 
+                 '--hwe', 1e-6, 
+                 '--indep-pairwise', 50, 10, 0.1, 
+                 '--out', '01_Data/QC_files/sample_ancestry_pruned'))
+```
+
+```{r}
+#| label: run-pca
+#| eval: true # set true to re-run, otherwise next step loads existing result
+
+system2(plink, 
+        args = c('--bfile', gtp_data, 
+                 '--keep', '01_Data/QC_files/sample_gtp_pass.txt', 
+                 '--extract', '01_Data/QC_files/sample_ancestry_pruned.prune.in', 
+                 '--pca', 
+                 '--out', '01_Data/QC_files/sample_ancestry_pca'))
+```
+
+## Identify outliers
+
+```{r}
+#| label: load-eigenvec
+
+pca_eigenvec <- read_table('01_Data/QC_files/sample_ancestry_pca.eigenvec', 
+                           col_names = c('FID', 'IID', paste0('PC', 1:20)))
+```
+
+The idea is identify PC clusters that correlate and help distinguish the observed ethnicities. The survey data contains information on ethnicities.
+
+```{r}
+#| label: load-survey
+
+survey <- read_dta('01_Data/metadac_work.dta')
+```
+
+```{r}
+survey |> look_for('ethn', labels = FALSE, values = FALSE, details = 'none')
+survey |> mutate(ethn_label = to_factor(c_ethn_dv)) |> count(c_ethn_dv, ethn_label)
+```
+
+Based on this, I can construct indicator for being white British (ever)
+
+```{r}
+#| label: survey-white-british
+
+survey <- survey |> mutate(c_white_british = c_ethn_dv == 1, 
+                           d_white_british = d_ethn_dv == 1, 
+                           e_white_british = e_ethn_dv == 1, 
+                           f_white_british = f_ethn_dv == 1, 
+                           g_white_british = g_ethn_dv == 1, 
+                           h_white_british = h_ethn_dv == 1)
+survey <- survey |> mutate(white_british = pmax(c_white_british, d_white_british, 
+                                                e_white_british, f_white_british, 
+                                                g_white_british, h_white_british, 
+                                                na.rm = TRUE), 
+                           white_british = if_else(is.na(white_british), 0, 
+                                                   white_british))
+survey <- survey |> mutate(white_british = if_else(white_british == 1, 
+                                                   'White British', 
+                                                   'Other'))
+survey |> count(white_british)
+```
+
+```{r}
+#| label: merge-eigenvec-survey
+
+pca_eigenvec <- pca_eigenvec |> 
+  left_join(survey |> select(id, white_british), 
+            by = join_by(IID == id))
+```
+
+```{r}
+#| label: fig-pc-ethnicity
+#| fig-cap: PC projections and survey ethnicity
+#| fig-subcap: 
+#|   - PC1 vs PC2
+#|   - PC2 vs PC3
+#|   - PC3 vs PC4
+#|   - PC4 vs PC5
+#| layout-ncol: 2
+
+pca_eigenvec |> 
+  ggplot(aes(x = PC1, y = PC2, colour = white_british, size = white_british)) + 
+  geom_point() + 
+  scale_size_discrete(range = c(1, 0.1)) + 
+  theme_minimal() + 
+  theme(legend.position = 'bottom')
+
+pca_eigenvec |> 
+  ggplot(aes(x = PC2, y = PC3, colour = white_british, size = white_british)) + 
+  geom_point() + 
+  scale_size_discrete(range = c(1, 0.1)) + 
+  theme_minimal() + 
+  theme(legend.position = 'bottom')
+
+pca_eigenvec |> 
+  ggplot(aes(x = PC3, y = PC4, colour = white_british, size = white_british)) + 
+  geom_point() + 
+  scale_size_discrete(range = c(1, 0.1)) + 
+  theme_minimal() + 
+  theme(legend.position = 'bottom')
+
+pca_eigenvec |> 
+  ggplot(aes(x = PC4, y = PC5, colour = white_british, size = white_british)) + 
+  geom_point() + 
+  scale_size_discrete(range = c(1, 0.1)) + 
+  theme_minimal() + 
+  theme(legend.position = 'bottom')
+```
+
+So, there don't seem to be clear separation between ethnic groups. I interpret this result as the sample already being predominantly of White European ancestry. This is consistent with the genotyping description in the Understanding Society in [Benzeval, Aguirre and Kumari (2023)](https://onlinelibrary.wiley.com/doi/abs/10.1111/1475-5890.12354):
+
+> At the time, large-scale genotyping was limited to people of White European descent because the reliability of techniques to accurately genotype people varied in different ethnic groups. After data cleaning and other quality control steps, approximately 9,900 samples are available for analysis.
+
+Hence, **ancestry filter does not remove any individual**!
+
+```{r}
+#| label: filter-ancestry
+
+filter_ancestry <- pca_eigenvec |> select(IID) |> mutate(FID = IID)
+```
+
+```{r}
+#| label: save-list
+
+filter_ancestry |> 
+  write_delim('01_Data/QC_files/sample_ancestry_pass.txt', 
+              delim = '\t', col_names = FALSE)
+```

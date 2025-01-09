@@ -1,0 +1,55 @@
+---
+title: Estimate GRM matrix
+author: Nurfatima Jandarova
+date: 18 December 2024
+---
+
+From the analysis plan
+
+> MLM analysis can be performed in software programs such as GCTA (Yang et al., 2010), BOLT-LMM, FaST-LMM, GEMMA. We recommend calculating the GRM using all genotyped (*not* imputed) SNPs after restricting individuals to the analysis sample and applying SNP-level quality control filters (e.g. call rate \> 95%, MAF\>1%, HWE *P*-value\>10^-6^).
+
+```{r}
+#| label: software
+
+plink <- '09_Software/plink_mac_20241022/plink'
+system2(plink, args = c('--version'), stdout = TRUE) |> cat(sep = '\n')
+
+plink2 <- '09_Software/plink2'
+system2(plink2, args = c('--version'), stdout = TRUE) |> cat(sep = '\n')
+
+gcta <- '09_Software/gcta-1.94.1'
+system2(gcta, args = c('--version'), stdout = TRUE) |> cat(sep = '\n')
+```
+
+## LD prune genotypes
+
+```{r}
+#| label: ld-prune
+
+system2(plink2, 
+        args = c('--bfile', '01_Data/imputation_files/metadac_clean', 
+                 '--indep-pairwise', '500kb', 0.2, 
+                 '--out', '01_Data/gwas_files/metadac_grm'), 
+        stdout = TRUE) |> 
+  cat(sep = '\n')
+
+system2(plink2, 
+        args = c('--bfile', '01_Data/imputation_files/metadac_clean', 
+                 '--extract', '01_Data/gwas_files/metadac_grm.prune.in', 
+                 '--make-bed', 
+                 '--out', '01_Data/gwas_files/metadac_grm'), 
+        stdout = TRUE) |> 
+  cat(sep = '\n')
+```
+
+## Calculate GRM
+
+```{r}
+#| label: grm
+#| eval: false # set true to run (error on Mac M*, needs Intel)
+
+system2(gcta, 
+        args = c('--bfile', '01_Data/gwas_files/metadac_grm', 
+                 '--make-grm', 
+                 '--out', '01_Data/gwas_files/metadac_grm'))
+```

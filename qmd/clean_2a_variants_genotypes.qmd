@@ -1,0 +1,150 @@
+---
+title: Clean variants prior to imputation
+author: Nurfatima Jandarova
+date: 5 December 2024
+---
+
+> Genotypes on all autosomal SNPs should be imputed against the 1000 Genomes Phase 3 [(1000 Genomes Project Consortium et al. 2015)](https://paperpile.com/c/YeeWE0/FEvs), Haplotype Reference Consortium [(McCarthy et al. 2016)](https://paperpile.com/c/YeeWE0/kedo), or TOPmed reference panels [(Taliun et al. 2021)](https://paperpile.com/c/YeeWE0/Np6O). We recommend SNPs with the following properties to be excluded prior to imputation:
+>
+> -   Call rate \< 95%
+> -   Hardy Weinberg Equilibrium test *P*-value \< 10^-6^
+> -   MAF \< 1%
+> -   SNPs with alleles not matching the reference panel
+> -   SNPs with allele frequencies significantly deviating from the reference panel
+> -   SNPs with duplicated base pair position
+> -   palindromic SNPs with MAF\>0.4
+>
+> These filters may change or other additional filters may be appropriate depending on cohort characteristics. If in doubt, please contact us for recommendations.
+
+In addition, [Naito and Okada (2024)](https://www.nature.com/articles/s10038-023-01213-6) describe genotype imputation methods. They particularly mention imputation servers that allow researchers to run imputation pipelines without needing particular expertise or software. I am using [Michigan Imputation Server 2](https://imputationserver.sph.umich.edu/) with HRC 1.1 as a reference panel. The server requires registration, but is free to use. It can also be accessed via API[^1].
+
+[^1]: Requires API token that can also be obtained after registration. I saved my token in `_environment.local` file.
+
+First three filters in the plan are typical and can be easily done with PLINK. Previously, I have checked the rest of the filters manually. Now, I am using the recommended tool [HRC or 1000G Pre-imputation Checks](http://www.well.ox.ac.uk/~wrayner/tools/) by Will Rayner (from the Michigan Imputation Server 2 data preparation guidelines). I have downloaded the tool in `09_Software` folder.
+
+```{r}
+#| label: load-packages
+
+library(tidyverse)
+library(pbapply)
+```
+
+```{r}
+#| label: plink
+
+plink <- '09_Software/plink_mac_20241022/plink'
+system2(plink, args = c('--version'), stdout = TRUE) |> cat(sep = '\n')
+
+plink2 <- '09_Software/plink2'
+system2(plink2, args = c('--version'), stdout = TRUE) |> cat(sep = '\n')
+
+bcftools <- '09_Software/bcftools'
+system2(bcftools, args = c('--version'), stdout = TRUE) |> cat(sep = '\n')
+```
+
+```{r}
+#| label: orig-data
+
+gtp_data <- '01_Data/MDAC-2019-0004-03E-ICHINO_20200406/MDAC-2019-0004-03E-ICHINO_sendout'
+```
+
+## Implement typical filters
+
+```{r}
+#| label: run-plink-filters
+
+system2(plink2, 
+        args = c('--bfile', gtp_data, 
+                 '--keep', '01_Data/QC_files/sample_ancestry_pass.txt', 
+                 '--mind', 0.05, 
+                 '--geno', 0.05, 
+                 '--maf', 0.01, 
+                 '--max-maf', 0.99, 
+                 '--hwe', 1e-6, 
+                 '--make-bed', 
+                 '--out', '01_Data/imputation_files/metadac_clean'))
+```
+
+Also compute allele frequencies
+
+```{r}
+#| label: compute-af
+
+system2(plink, 
+        args = c('--bfile', '01_Data/imputation_files/metadac_clean', 
+                 '--freq', 
+                 '--out', '01_Data/imputation_files/metadac_clean'))
+```
+
+## Reference panel
+
+The tool requires file with variants from the reference panel HRC 1.1
+
+```{r}
+#| label: reference-panel
+#| eval: false # set true to re-download
+
+# Download
+site_list_url <- 'ftp://ngs.sanger.ac.uk/production/hrc/HRC.r1-1/HRC.r1-1.GRCh37.wgs.mac5.sites.tab.gz'
+multi_download(site_list_url, 
+               '01_Data/HRC1.1/HRC.r1-1.GRCh37.wgs.mac5.sites.tab.gz', 
+               resume = TRUE, progress = TRUE)
+
+# Unzip
+system2('gunzip', 
+        args = c('--keep', 
+                 '01_Data/HRC1.1/HRC.r1-1.GRCh37.wgs.mac5.sites.tab.gz'))
+```
+
+## Run the QC tool
+
+```{r}
+#| label: run-HRC-QC
+
+system2('perl', 
+      args = c('09_Software/HRC-1000G-check-bim-v4/HRC-1000G-check-bim.pl', 
+               '-b', '01_Data/imputation_files/metadac_clean.bim', 
+               '-f', '01_Data/imputation_files/metadac_clean.frq', 
+               '-r', '01_Data/HRC1.1/HRC.r1-1.GRCh37.wgs.mac5.sites.tab', 
+               '-h', 
+               '-l', '09_Software/plink_mac_20241022/plink'))
+```
+
+The tool wrote a shell script to run PLINK commands that implement the additional QC filters. But the paths are expanded (absolute paths, not relative). Since the folder is located in Google Drive and there are spaces in paths, simply running the shell script fails. Therefore, I load it as text file here to fix the paths and run them one by one from inside R.
+
+```{r}
+#| label: load-additional-plink
+
+hrc_plink_commands <- read_lines('01_Data/imputation_files/Run-plink.sh')
+
+# Remove path to project folder (keep only relative paths within project)
+hrc_plink_commands <- str_remove_all(hrc_plink_commands, paste0(getwd(), '/'))
+
+# Last command is to remove temporary files
+hrc_plink_commands[length(hrc_plink_commands)]
+if (hrc_plink_commands[length(hrc_plink_commands)] == 'rm TEMP*') hrc_plink_commands <- hrc_plink_commands[1:(length(hrc_plink_commands)-1)]
+```
+
+```{r}
+#| label: run-additional-plink
+
+map(hrc_plink_commands, system)
+
+# Remove temporary files
+file.remove(list.files('01_Data/imputation_files/', 'TEMP*', full.names = TRUE))
+```
+
+## Sort the VCF file
+
+```{r}
+#| label: bcftools-sort
+
+pblapply(seq(1, 22), function(chr) {
+  # Make sure vcf is sorted
+  system2(bcftools, 
+          args = c('sort', 
+                   sprintf('01_Data/imputation_files/metadac_clean-updated-chr%d.vcf', chr), 
+                   '-Oz', 
+                   '-o', sprintf('01_Data/imputation_files/upload/metadac_clean-updated-chr%d.vcf.gz', chr)))
+})
+```

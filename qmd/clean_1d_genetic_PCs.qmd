@@ -1,0 +1,97 @@
+---
+title: Run genetic PCA using final set of individuals
+author: Nurfatima Jandarova
+date: 4 December 2024
+---
+
+```{r}
+#| label: load-packages
+
+library(tidyverse)
+library(haven)
+library(labelled)
+```
+
+```{r}
+#| label: plink
+
+plink <- '09_Software/plink_mac_20241022/plink'
+system2(plink, args = c('--version'))
+
+plink2 <- '09_Software/plink2'
+system2(plink2, args = c('--version'))
+```
+
+```{r}
+#| label: orig-data
+
+gtp_data <- '01_Data/MDAC-2019-0004-03E-ICHINO_20200406/MDAC-2019-0004-03E-ICHINO_sendout'
+```
+
+Compute genetic PCs using the clean sample of individuals. Previously, have already applied sample filters based on [availability of survey variables](clean_1a_sample_variables.qmd), [quality of genotype data](clean_1b_sample_genotypes.qmd) and [genetic ancestry](clean_1c_sample_ancestry.qmd).
+
+## Run PCA
+
+```{r}
+#| label: filter-ld
+
+system2(plink2, 
+        args = c('--bfile', gtp_data, 
+                 '--keep', '01_Data/QC_files/sample_ancestry_pass.txt', 
+                 '--mind', 0.05, 
+                 '--geno', 0.05, 
+                 '--maf', 0.01, 
+                 '--max-maf', 0.99, 
+                 '--hwe', 1e-6, 
+                 '--indep-pairwise', 50, 10, 0.1, 
+                 '--out', '01_Data/QC_files/sample_final_pca'))
+```
+
+```{r}
+#| label: run-pca
+#| eval: false # set true to re-run, otherwise next step loads existing result
+
+system2(plink, 
+        args = c('--bfile', gtp_data, 
+                 '--keep', '01_Data/QC_files/sample_ancestry_pass.txt', 
+                 '--extract', '01_Data/QC_files/sample_final_pca.prune.in', 
+                 '--pca', 
+                 '--out', '01_Data/QC_files/sample_final_pca'))
+```
+
+## Merge with survey data
+
+```{r}
+#| label: load-eigenvec
+
+pca_eigenvec <- read_table('01_Data/QC_files/sample_final_pca.eigenvec', 
+                           col_names = c('FID', 'IID', paste0('PC', 1:20)))
+pca_eigenvec <- pca_eigenvec |> rename_with(~str_c(., '_final'), starts_with('PC'))
+```
+
+```{r}
+#| label: load-survey
+
+survey <- read_dta('01_Data/metadac_work.dta')
+```
+
+```{r}
+#| label: merge-survey-eigenvec
+
+# Merge
+survey <- survey |> 
+  left_join(pca_eigenvec, by = join_by(id == IID), suffix = c('_orig', '_final'))
+
+# Remove individuals with missing PCs
+survey <- survey |> drop_na(ends_with('_final'))
+
+nrow(survey)
+```
+
+## Save data
+
+```{r}
+#| label: save-dta
+
+survey |> write_dta('01_Data/metadac_gwas.dta')
+```

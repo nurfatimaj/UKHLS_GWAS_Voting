@@ -1,0 +1,77 @@
+---
+title: Run GWAS using BOLT-LMM
+author: Nurfatima Jandarova
+date: 19 December 2024
+---
+
+Based on codes from Tobias: <https://github.com/Edwa0506/MCTFR_GWAS_voting/blob/main/3_GWAS_second_order.sh>
+
+```{r}
+#| label: software
+
+bolt <- '09_Software/BOLT-LMM_v2.3/bolt'
+system2(bolt, stdout = TRUE) |> cat(sep = '\n')
+```
+
+Part of the information that is necessary for the estimation is the GRM matrix. I have already computed it before. However, the software BOLT-LMM does not accept pre-computed GRM matrix. Instead, it computes it on its own, provided I give it a list of variants that should participate in this step. I have this information from the GRM computation in [gwas_1a_estimate_grm.qmd](gwas_1a_estimate_grm.qmd). The only issue is that SNP IDs used in GRM compuation are original SNP IDs used in METADAC, while after imputation each SNP is assigned an ID given the formula CHR:POS.
+
+```{r}
+#| label: grm-snps-reset-id
+
+library(tidyverse)
+grm_bim <- read_table('01_Data/gwas_files/metadac_grm.bim', 
+                      col_names = c('chr', 'rsid', 'cm', 'bp', 'a1', 'a2'), 
+                      guess_max = 1e5)
+grm_bim <- grm_bim |> mutate(ID = str_c(chr, bp, sep = ':'))
+grm_bim |> 
+  filter(chr %in% 1:22) |> 
+  pull(ID) |> 
+  write_lines('01_Data/gwas_files/metadac_grm.snps', sep = '\n')
+```
+
+Since the job might be long, it is better to submit it as SLURM job rather than running it here. To do that, need to write a special shell script that runs BOLT.
+
+```{r}
+#| label: slurm-script
+
+header <- '#!/bin/bash -l
+#SBATCH --time=12:00:00
+#SBATCH --nodes=1
+#SBATCH --mem=60g
+#SBATCH --tmp=60g
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=njandaro@umn.edu 
+'
+
+wd <- getwd()
+
+cmd_string <- paste(bolt, 
+                    '--lmm', 
+                    '--bfile', '01_Data/imputation_files/metadac_imputed_clean', 
+                    '--phenoFile', '01_Data/gwas_files/pheno.txt', 
+                    '--phenoCol', 'avg_res_voted_high', 
+                    '--LDscoresFile', '09_Software/BOLT-LMM_v2.3/tables/LDSCORE.1000G_EUR.tab.gz', 
+                    '--modelSnps', '01_Data/gwas_files/metadac_grm.snps', 
+                    '--statsFile', '01_Data/gwas_files/METADAC.HIGH.stats.20241219', 
+                    '--verboseStats',
+                    sep = ' ')
+
+script_file <- '01_Data/gwas_files/run_gwas.sh'
+  
+# Write the script to file
+write_lines(header, script_file, append = FALSE)
+write_lines(paste('cd', wd), script_file, append = TRUE)
+write_lines(cmd_string, script_file, append = TRUE)
+
+# Preview
+system2('more', args = c(script_file), stdout = TRUE) |> cat(sep = '\n')
+```
+
+```{r}
+#| label: submit-job
+#| eval: false # set true to re-run
+
+system2('sbatch', 
+        args = c('--job-name', 'gwas-bolt', 
+                 script_file), stdout = TRUE) |> cat(sep = '\n')
+```
