@@ -1,0 +1,511 @@
+---
+title: Overview of METADAC analysis
+author: Nurfatima Jandarova
+format: pdf
+pdf-engine: latexmk
+documentclass: article
+geometry:
+  - top = 2cm
+  - left = 2cm
+  - right = 2cm
+  - bottom = 2cm
+fontsize: 11pt
+papersize: a4
+number-sections: true
+toc: true
+bibliography: references.bib
+execute:
+  echo: false
+  warning: false
+---
+
+```{=html}
+<!--
+Following the analysis plan and additionally consulting
+
+-   codes from Tobias Edwards: [MCTFR_GWAS](https://github.com/Edwa0506/MCTFR_GWAS_voting/blob/main/1_create_PCs.R) and [MIDUS_GWAS](https://github.com/Edwa0506/MIDUS_GWAS/blob/master/Identify_ancestry.R)
+-   [Anderson et al. (2010)](https://pmc.ncbi.nlm.nih.gov/articles/PMC3025522/) GWAS QC protocol
+
+## Sample QC
+
+-   [eligible to vote and have non-missing covariates](clean_1a_sample_variables.qmd)
+-   [successfully genotyped and no outliers](clean_1b_sample_genotypes.qmd)
+-   [European ancestry](clean_1c_sample_ancestry.qmd)
+-->
+```
+
+```{r}
+#| label: load-packages
+
+library(tidyverse)
+library(haven)
+library(labelled)
+library(modelsummary)
+```
+
+# Original data
+
+The genotyping data is provided by the UK Household Longitudinal Study (UKHLS). It is a panel survey of the UK population that started in 2009 and follows the sample members each year since. Each wave contains information on about 40,000 individuals. In waves 2 and 3 (years 2010-2011), the survey participants were also asked for their bio samples, which were later genotyped. The genotype information is available for slightly less than 10,000 individuals. For more information, see @benzeval2023.
+
+We received the data back in 2020, from the METADAC[^1], hence the name. We received the data in two batches: April 2020 and June 2023. In April 2020 we received all the genotype data and most of the requested survey variables. In June 2023 we received variables related to political participation and party affiliations. Due to data protection considerations, the survey data released together with the genotype data cannot be linked with the full survey dataset (i.e., one with 40,000 observations). The individual identifiers in the genotype survey dataset is not the same as IDs in the full survey.
+
+[^1]: Since then the data management has shifted back to the UKHLS.
+
+April 2020:
+
+```{r}
+#| label: metadac-batch-1
+
+list.files('01_Data/MDAC-2019-0004-03E-ICHINO_20200406/', pattern = 'MDAC', full.names = TRUE) |> cat(sep = '\n')
+```
+
+June 2023:
+
+```{r}
+#| label: metadac-batch-2
+
+list.files('01_Data/MDAC-2019-0004-03E-ICHINO_20230623/', pattern = 'MDAC', full.names = TRUE) |> cat(sep = '\n')
+```
+
+The genotype data contains information on more than 500,000 variants and 9,921 individuals (see below number of lines in .bim and .fam files).
+
+```{r}
+#| label: metadac-sizes
+
+system2('wc', args = c('-l', '01_Data/MDAC-2019-0004-03E-ICHINO_20200406/MDAC-2019-0004-03E-ICHINO_sendout.bim'), 
+        stdout = TRUE) |> cat(sep = '\n')
+system2('wc', args = c(' -l', '01_Data/MDAC-2019-0004-03E-ICHINO_20200406/MDAC-2019-0004-03E-ICHINO_sendout.fam'), 
+        stdout = TRUE) |> cat(sep = '\n')
+```
+
+# Sample filters
+
+```{r}
+#| label: load-data
+
+survey_old <- read_dta('01_Data/MDAC-2019-0004-03E-ICHINO_20200406/MDAC-2019-0004-03E-ICHINO_sendout.dta')
+survey_new <- read_dta('01_Data/MDAC-2019-0004-03E-ICHINO_20230623/MDAC-2019-0004-03E-ICHINO_202306_sendout.dta')
+survey <- survey_old %>% left_join(survey_new, by = 'id', suffix = c('', '_new'))
+```
+
+The analysis plan specified the following sample inclusion criteria:
+
+> *We will use the following individual inclusion criteria:*
+>
+> a)  *They are of European genetic ancestries*
+> b)  *They are eligible to vote, i.e. have been age-eligible to vote at least once, and are eligible on grounds of residence/citizenship etc.*
+> c)  *The control variables specified above are non-missing*
+> d)  *They were genotyped successfully (genotyping call rate \>95%, per chromosome missingness rate \< 5%)*
+> e)  *They passed the cohort-specific standard quality controls, e.g. excluding individuals who are ancestry/heterozygosity outliers in the cohort, individuals whose reported sex does not match their sex derived from their genotypes, duplicates, etc..*
+
+## Voting eligibility
+
+`03_Analysis/clean_1a_sample_variables.qmd`
+
+Voting eligibility is based on citizenship and age (at least 18).
+
+Although the dataset has a variable for citizenship status, it is missing for 97% of the sample. Therefore, I do not use citizenship to identify eligibility.
+
+```{r}
+#| label: survey-citizenship
+
+survey |> 
+  mutate(ever_citizen = pmax(a_citzn1, b_citzn1, c_citzn1, d_citzn1, 
+                             e_citzn1, f_citzn1, g_citzn1, h_citzn1, 
+                             na.rm = TRUE)) |> 
+  count(ever_citizen) |> 
+  mutate(freq = n / sum(n) * 100)
+```
+
+The genotype survey dataset has variable for age at the time of wave 3 survey (`c_age_dv`). I first extrapolate this information to other waves. For example, subtracting one year in wave 2, or adding one year in wave 4, etc. Thus, the inclusion criteria is that an individual should be age 18 or over at least once in the years when voting question was asked.
+
+```{r}
+#| label: fig-survey-age-wave3
+#| fig-cap: Age distribution in wave 3
+
+survey |> 
+  ggplot() + 
+  geom_histogram(aes(x = c_age_dv), binwidth = 1) + 
+  geom_vline(xintercept = 18, colour = 'red', linetype = 'dashed') + 
+  labs(x = 'Age in wave 3', y = 'Count') + 
+  theme_minimal()
+```
+
+Additionally, I use information recorded in the voting indicator itself. For example, here is the tabulation of the voting question in wave 2
+
+```{r}
+#| label: survey-b_vote7-table
+
+survey |> count(b_vote7)
+```
+
+So, individuals ineligible to vote for whatever reason are assigned value 3 in voting indicator. I combine the age limit and voting indicator information in each wave when voting was observed. Then, for each individual, I construct a binary variable whether they were ever eligible to vote (see tabulation below). Some observations in eligibility indicator are missing because they don't have age information in wave 3 and they have never responded to any voting questions. I drop observations who were never eligible to vote and those whose eligibility information is missing.
+
+{{< embed clean_1a_sample_variables.qmd#voting-eligibility >}}
+
+## Non-missing covariates
+
+`03_Analysis/clean_1a_sample_variables.qmd`
+
+The covariates used in the analysis are
+
+-   genetic principal components
+-   genotype/imputation batch
+-   sex
+-   age
+
+The dataset does not contain any variable for genotype batches. Hence, I remove 218 observations with missing sex and age variables.
+
+## Standard QC
+
+`03_Analysis/clean_1b_sample_genotypes.qmd`
+
+-   Remove individuals with more than 5% of genotype information missing
+
+-   Remove heterozygosity outliers (outside of 3 sd range around the mean)
+
+    {{< embed clean_1b_sample_genotypes.qmd#filter-heterozygosity >}}
+
+-   Remove individuals with mismatch of observed and genetic sex
+
+-   Remove related individuals (using `--rel-cutoff 0.025`)
+
+{{< embed clean_1b_sample_genotypes.qmd#filter-all >}}
+
+## European ancestry
+
+`03_Analysis/clean_1c_sample_ancestry.qmd`
+
+There is no ready-made variable in the dataset that indicates whether someone is from European genetic ancestry. To identify ancestry, I compute genetic PCs and compare them with the ethnicity variables available in the survey data.
+
+I compute the genetic PCs using genotypes of individuals passing the above sample with genotypes standard QC filters (sample call rate \> 95%, genotype call rate \>95%, MAF $\geq$ 1%, HWE p-value $\geq 10^{-6}$ and pruned for LD).
+
+The survey dataset contains information on ethnicities, which I use to construct White British indicator.
+
+@fig-pca-ancestry plots PC projections by survey ethnicity. So, there don’t seem to be clear separation between ethnic groups. I interpret this result as the sample already being predominantly of White European ancestry. This is consistent with the genotyping description in the Understanding Society in @benzeval2023:
+
+> *At the time, large-scale genotyping was limited to people of White European descent because the reliability of techniques to accurately genotype people varied in different ethnic groups. After data cleaning and other quality control steps, approximately 9,900 samples are available for analysis.*
+
+::: {#fig-pca-ancestry .figure fig-cap="PC projections and survey ethnicity" layout-ncol="2"}
+![PC1 vs PC2](images/fig-pc-ethnicity-1.png){fig-align="center"}
+
+![PC2 vs PC3](images/fig-pc-ethnicity-2.png){fig-align="center"}
+
+![PC3 vs PC4](images/fig-pc-ethnicity-3.png){fig-align="center"}
+
+![PC4 vs PC5](images/fig-pc-ethnicity-4.png){fig-align="center"}
+:::
+
+Thus, I keep all individuals surviving the previous filters. Finally, I re-compute genetic principal components in `03_Analysis/clean_1d_genetic_PCs.qmd` and merge first 20 PCs to the working survey dataset in `01_Data/metadac_gwas.dta`.
+
+Number of individuals passing sample filters
+
+```{r}
+system2('wc', args = c('-l', '01_Data/imputation_files/metadac_clean.fam'), stdout = TRUE) |> 
+  cat(sep = '\n')
+```
+
+# Phenotypes
+
+`03_Analysis/clean_1e_sample_phenotypes.qmd`
+
+I saved phentoype dataset in `01_Data/gwas_files/pheno.txt`, making sure that it follows the format requirements of BOLT-LMM software. Since I residualise the phenotypes with respect to covariates suggested in the analysis plan, I don't need to save the covariates along with phenotypes.
+
+## Voting indicator
+
+The survey dataset contains several indicators about political participation. First, voting behaviour in the most recent general election. This is **first-order election in the UK**. During the sample coverage there were four general elections: May 2010 (`b_vote7`), May 2015 (`g_vote7`), June 2017 (`h_vote7, i_vote7, j_vote7`), December 2019 (`k_vote7, l_vote7`)[^2]. I recode these indicators to binary variables where 1 means individual voted in GE, 0 means she did not vote and missing otherwise (i.e., if original variable is missing or if ineligible to vote in that election).
+
+[^2]: You can notice that survey methodology changed in 2017. Instead of asking the voting question immediately after the corresponding general election, they started asking the question in each wave. As a result, the answers in recent waves may refer to elections held 2-3 years ago.
+
+```{r}
+survey |> look_for('vote7', labels = FALSE, values = FALSE, details = FALSE)
+```
+
+The analysis plan suggests that multiple voting observations per person should be aggregated as follows.
+
+> Since in some cases, there will be data on multiple elections for the same individual, we will aggregate data at the individual level. To accomplish this, and remove as much noise in the measurement as possible, we will use the following procedure to define the phenotype measures. First, for each election, we will linearly regress the binary turnout measure on the covariates listed in Section 5. . Then, we calculate the standardized residuals of this regression. Finally, we take the average of these standardized residuals across elections for each individual. This gives a single measure per individual. Note that if only data on i.e. year of birth is available (rather than month or date), age at time of the election should be set to the “most likely” match by the half-year threshold: *election year minus birth year* if the election was held in the second half of the year, and *election year minus birth year minus 1* if the election was held in the first half of the year.
+
+I follow this algorithm and save the standardised residuals in the `avg_res_voted_high` variable.
+
+### Political alignment
+
+In addition to actual voting behaviour, the survey asks all adult participants whether they feel close to or support any political party. This variable is asked almost every wave.
+
+```{r}
+survey |> look_for('vote1', labels = FALSE, values = FALSE, details = FALSE)
+survey |> look_for('vote2', labels = FALSE, values = FALSE, details = FALSE)
+```
+
+I follow similar strategy as with actual voting indicators. I convert these to binary variables in each election, aggregate across waves, and save standardised residuals in `avg_res_aligned` variable.
+
+# Descriptives
+
+`03_Analysis/clean_1e_sample_descriptives.qmd`
+
+The survey variables are saved in `01_Data/METADAC.descriptives.20241220.xls`. In particular, it contains voting and alignment variables from each wave (and corresponding ages), party choices, cognitive test results and Big5 personality test results.
+
+## Party affiliation
+
+Similar to political participation variables, party choices also are divided into two groups of variables. First, is the party actually voted for in the last general election. I create four binary variables for Conservative, Labour, LibDem and other party choices. The binary indicators are missing if the original party choice variable is missing or if individual was ineligible to vote in that election.
+
+Second, is the party one would vote for tomorrow or party one feels closest to[^3]. I combine this information into one variable and call it party alignment. This variable is also asked almost every wave. Again, I construct four binary variables in each wave corresponding to alignment with Conservative, Labour, LibDem or other party.
+
+[^3]: These variables are mutually exclusive, i.e., if someone indicated party she would vote for tomorrow, then party closest to is missing, and vice versa.
+
+I use different aggregation algorithm with party information: I create binary variables recording if they have ever voted for/aligned with a given party.
+
+{{< embed clean_1f_sample_descriptives.qmd#survey-aggregate-party >}}
+
+## Cognitive test results
+
+The survey administered cognitive tests to adult respondents in wave 3:
+
+-   word recall (immediate `c_cgwri_dv` and delayed `c_cgwrd_dv`),
+-   serial 7 subtraction `c_cgs7cs_dv`,
+-   numbers series `c_cgns1sc6_dv` and `c_cgns2sc6_dv`,
+-   verbal fluency `c_cgvfc_dv`, and
+-   numeric ability `c_cgna_dv`.
+
+The dataset contains variables with counts of correct answers to each of the test. I combine these counts into cognitive ability score using confirmatory factor analysis (CFA). Before doing this, it helps to first estimate the CFA in the full survey, i.e., including non-genotyped individuals. After CFA estimation, I predict the scores in the survey dataset. Before running the CFA I standardise the test results in each birth cohort and gender cell to account for age and gender differences in results.
+
+{{< embed clean_1f_sample_descriptives.qmd#survey-cognitive >}}
+
+## Big 5 personality
+
+In wave 3, adult participants have also answered Big 5 personality tests. The total scores along the five dimensions are recorded in `c_big5a_dv, c_big5c_dv, c_big5e_dv, c_big5n_dv, c_big5o_dv`. I combine these scores into single big5 personality score using PCA (also run it first in the full survey and predict in the genotyped survey data).
+
+{{< embed clean_1f_sample_descriptives.qmd#survey-big5 >}}
+
+# Variant filters
+
+`03_Analysis/clean_2a_variants_genotypes.qmd`
+
+The analysis plan suggests the following
+
+> Genotypes on all autosomal SNPs should be imputed against the 1000 Genomes Phase 3 [(1000 Genomes Project Consortium et al. 2015)](https://paperpile.com/c/YeeWE0/FEvs), Haplotype Reference Consortium [(McCarthy et al. 2016)](https://paperpile.com/c/YeeWE0/kedo), or TOPmed reference panels [(Taliun et al. 2021)](https://paperpile.com/c/YeeWE0/Np6O). We recommend SNPs with the following properties to be excluded prior to imputation:
+>
+> -   Call rate \< 95%
+> -   Hardy Weinberg Equilibrium test *P*-value \< 10^-6^
+> -   MAF \< 1%
+> -   SNPs with alleles not matching the reference panel
+> -   SNPs with allele frequencies significantly deviating from the reference panel
+> -   SNPs with duplicated base pair position
+> -   palindromic[^4] SNPs with MAF\>0.4
+>
+> These filters may change or other additional filters may be appropriate depending on cohort characteristics. If in doubt, please contact us for recommendations.
+
+[^4]: These are SNPs with alleles AT, TA, GC or CG.
+
+I use PLINK2 to apply the call rate, HWE and MAF filters.
+
+I use the HRC 1.1 as a reference panel. The list of the HRC 1.1 variants can be downloded from <ftp://ngs.sanger.ac.uk/production/hrc/HRC.r1-1/HRC.r1-1.GRCh37.wgs.mac5.sites.tab.gz>.
+
+For the rest of the filters I use [HRC or 1000G Pre-imputation Checks](http://www.well.ox.ac.uk/~wrayner/tools/) software written by Will Rayner. This tool is recommended by the [Michigan Imputation Server 2](https://imputationserver.sph.umich.edu/) guidelines. It restricts the data to overlapping variants (between analysis data and reference panel) and enforces allele alignment (swapping or flipping if necessary). It also removes variants with mismatched alleles and palindromic SNPs with MAF \> 0.4. Finally, it splits the cleaned genotypes by chromosomes, converts them to .vcf.gz format and sorts the variants by basepair position.
+
+```{r}
+system('ls 01_Data/imputation_files/metadac_clean-updated-chr??bim 01_Data/imputation_files/metadac_clean-updated-chr???bim | sort --version-sort | xargs wc -l')
+```
+
+# Imputation
+
+For imputation, I use [Michigan Imputation Server 2](https://imputationserver.sph.umich.edu/) with HRC 1.1 as a reference panel. That is, imputation is run on the specialised server, not on a local computer. The server requires registration, but is free to use. I upload the cleaned .vcf.gz files to the server, specify the reference panel and submit the job. Since I have run the data through the Pre-Imputation check tool in the previous step, the QC on the server passes easily. The imputation itself takes less than 24 hours to be completed. The results can then be downloaded from the website[^5]. Since the files are large (a little less than 1TB), I downloaded them to the Minnesota Supercomputer Institute (MSI) working folder (`/home/rustich0/njandaro/Voting_GWAS/01_Data/imputation_files/download`).
+
+[^5]: There is a specific time window within which the results can be downloaded. After the window is passed, the files are deleted from the Michigan Imputation Server.
+
+Here is the QC report generated by the Michigan Imputation Server.
+
++-------------------------------------------+------------------------------------------------------------------------+
+| Parameter                                 | Value                                                                  |
++:==========================================+:=======================================================================+
+| Samples                                   | 8731                                                                   |
++-------------------------------------------+------------------------------------------------------------------------+
+| Chromosomes                               | 1 10 11 12 13 14 15 16 17 18 19 2 20 21 22 3 4 5 6 7 8 9               |
++-------------------------------------------+------------------------------------------------------------------------+
+| SNPs                                      | 260486                                                                 |
++-------------------------------------------+------------------------------------------------------------------------+
+| Chunks                                    | 153                                                                    |
++-------------------------------------------+------------------------------------------------------------------------+
+| Datatype                                  | unphased                                                               |
++-------------------------------------------+------------------------------------------------------------------------+
+| Build                                     | hg19                                                                   |
++-------------------------------------------+------------------------------------------------------------------------+
+| Reference Panel                           | hrc-r1.1 (hg19)                                                        |
++-------------------------------------------+------------------------------------------------------------------------+
+| Population                                | eur                                                                    |
++-------------------------------------------+------------------------------------------------------------------------+
+| Phasing                                   | beagle                                                                 |
++-------------------------------------------+------------------------------------------------------------------------+
+| Mode                                      | imputation                                                             |
++-------------------------------------------+------------------------------------------------------------------------+
+| **Statistics**                            |                                                                        |
++-------------------------------------------+------------------------------------------------------------------------+
+| Alternative allele frequency \> 0.5 sites | 81,197                                                                 |
++-------------------------------------------+------------------------------------------------------------------------+
+| Reference Overlap                         | 100.00 %                                                               |
++-------------------------------------------+------------------------------------------------------------------------+
+| Match                                     | 260,486                                                                |
++-------------------------------------------+------------------------------------------------------------------------+
+| Allele switch                             | 0                                                                      |
++-------------------------------------------+------------------------------------------------------------------------+
+| Strand flip                               | 0                                                                      |
++-------------------------------------------+------------------------------------------------------------------------+
+| Strand flip and allele switch             | 0                                                                      |
++-------------------------------------------+------------------------------------------------------------------------+
+| A/T, C/G genotypes                        | 0                                                                      |
++-------------------------------------------+------------------------------------------------------------------------+
+| **Filtered sites**                        |                                                                        |
++-------------------------------------------+------------------------------------------------------------------------+
+| Filter flag set                           | 0                                                                      |
++-------------------------------------------+------------------------------------------------------------------------+
+| Invalid alleles                           | 0                                                                      |
++-------------------------------------------+------------------------------------------------------------------------+
+| Multiallelic sites                        | 0                                                                      |
++-------------------------------------------+------------------------------------------------------------------------+
+| Duplicated sites                          | 0                                                                      |
++-------------------------------------------+------------------------------------------------------------------------+
+| NonSNP sites                              | 0                                                                      |
++-------------------------------------------+------------------------------------------------------------------------+
+| Monomorphic sites                         | 0                                                                      |
++-------------------------------------------+------------------------------------------------------------------------+
+| Allele mismatch                           | 0                                                                      |
++-------------------------------------------+------------------------------------------------------------------------+
+| SNPs call rate \< 90%                     | 0                                                                      |
++-------------------------------------------+------------------------------------------------------------------------+
+| Excluded sites in total                   | 0                                                                      |
++-------------------------------------------+------------------------------------------------------------------------+
+| Remaining sites in total                  | 260,486                                                                |
++-------------------------------------------+------------------------------------------------------------------------+
+| **Warning**                               | 1 Chunk(s) excluded: \< 20 SNPs (see chunks-excluded.txt for details). |
++-------------------------------------------+------------------------------------------------------------------------+
+| Remaining chunk(s)                        | 152                                                                    |
++-------------------------------------------+------------------------------------------------------------------------+
+
+@fig-imputation-af-plot shows the densities of frequencies falling into each part. The first 5000 points from areas of lowest regional densities will be plotted.
+
+![Distribution of allele frequencies in data and reference panel](images/clipboard-942780372.png){#fig-imputation-af-plot .figure fig-align="center"}
+
+# Post-imputation QC
+
+`03_Analysis/clean_2c_variants_imputedQC.qmd`
+
+The post-imputation QC has similar steps as in [Variant filters], with an addition of imputation quality filter
+
+-   Imputation quality: $R^2 \geq 0.7$
+
+-   MAF $\geq$ 1%
+
+-   Call rate $\geq$ 95%
+
+-   HWE p-value $\geq 10^{-6}$
+
+Finally, I convert to PLINK .bed format and merge all chromosomes into one file. This script can only be run on the MSI since the raw imputed files are stored only there.
+
+# GWAS
+
+From the analysis plan
+
+> *We recommend conducting mixed linear model based association analysis (MLM) to account effectively for relatedness and population stratification. This method uses a maximum likelihood approach to estimate the following model:*
+>
+> *y = a + bx + g + e*
+>
+> *where y is the phenotype, a is the mean term, b is the additive effect (fixed effect) of the  candidate SNP to be tested for association, x is the SNP genotype, g is the polygenic effect (random effect) i.e. the accumulated effect of all SNPs as captured by the genetic relatedness matrix (GRM)  and e is the residual.*
+>
+> *MLM analysis can be performed in software programs such as GCTA (Yang et al., 2010), BOLT-LMM, FaST-LMM, GEMMA. We recommend calculating the GRM using all genotyped (not imputed) SNPs after restricting individuals to the analysis sample and applying SNP-level quality control filters (e.g. call rate \> 95%, MAF\>1%, HWE P-value\>10^-6^).*
+>
+> *We recommend using the reference allele **dosage** (not the allele count) as the genotype measure in the GWAS. Hard called genotypes do not account for imputation uncertainty.*
+
+## GRM
+
+`03_Analysis/gwas_1a_estimate_grm.qmd`
+
+This script can be run on a local computer. As recommended, I only use genotyped calls passing previous sample and variant filters. These are conveniently saved in
+
+```{r}
+list.files('01_Data/imputation_files/', pattern = 'metadac_clean\\.[bed|bim|fam]', full.names = TRUE) |> cat(sep = '\n')
+```
+
+I also prune them for LD using `--indep-pairwise 500kb 0.2` option of PLINK2. This returns a list of approximately independent SNP rsid's. In principle, this list of SNPs is sufficient (I don't actually need to compute GRM matrix, but I do).
+
+Number of SNPs for GRM computation
+
+```{r}
+system2('wc', args = c('-l', '01_Data/gwas_files/metadac_grm.prune.in'), stdout = TRUE) |> 
+  cat(sep = '\n')
+```
+
+## Estimate with BOLT-LMM
+
+`03_Analysis/gwas_1b_run_bolt.qmd`
+
+As suggested by [Tobias](https://github.com/Edwa0506/MCTFR_GWAS_voting/blob/main/3_GWAS_second_order.sh), the latest version of BOLT-LMM that runs on MSI is 2.3. I installed it on MSI in `09_Software` folder. This is the code that was executed on MSI.
+
+``` bash
+09_Software/BOLT-LMM_v2.3/bolt \
+  --lmm \
+  --bfile 01_Data/imputation_files/metadac_imputed_clean \
+  --phenoFile 01_Data/gwas_files/pheno.txt \
+  --phenoCol avg_res_voted_high \
+  --LDscoresFile 09_Software/BOLT-LMM_v2.3/tables/LDSCORE.1000G_EUR.tab.gz 
+  --modelSnps 01_Data/gwas_files/metadac_grm.snps 
+  --statsFile 01_Data/gwas_files/METADAC.HIGH.stats.20241219 
+  --verboseStats
+```
+
+Number of SNPs in GWAS output
+
+```{r}
+system2('wc', args = c('-l', '01_Data/gwas_files/METADAC.HIGH.stats.20241219'), 
+        stdout = TRUE) |> cat(sep = '\n')
+```
+
+## Format output
+
+`03_Analysis/gwas_1c_format_output.qmd`
+
+The GWAS summary statistics should be formatted as follows
+
++----------------------------------+------------------------------------------------------------------------------------------------------+
+| Variable name (case sensitive!!) | Description                                                                                          |
++----------------------------------+------------------------------------------------------------------------------------------------------+
+| SNPID                            | SNP identifier (e.g. rs number, CHR:BP, CHR:BP:A1:A2)                                                |
+|                                  |                                                                                                      |
+| CHR                              | Chromosome                                                                                           |
++----------------------------------+------------------------------------------------------------------------------------------------------+
+| BP_b37                           | GRCh37 base pair position (if GRCh38 positions are available instead, name the column BP_b38)        |
++----------------------------------+------------------------------------------------------------------------------------------------------+
+| EFFECT_ALLELE                    | Coded allele, also called modeled allele (A/C/G/T/R/I/D)                                             |
+|                                  |                                                                                                      |
+|                                  | In example of A/G SNP in which AA=0, AG=1 and GG=2, the coded allele is G                            |
++----------------------------------+------------------------------------------------------------------------------------------------------+
+| OTHER_ALLELE                     | The other allele                                                                                     |
++----------------------------------+------------------------------------------------------------------------------------------------------+
+| EAF                              | Effect allele frequency                                                                              |
++----------------------------------+------------------------------------------------------------------------------------------------------+
+| BETA                             | Beta estimate from genotype-phenotype association, at least 5 decimal places – ‘NA’ if not available |
++----------------------------------+------------------------------------------------------------------------------------------------------+
+| SE                               | Standard error of beta estimate, to at least 5 decimal places – ‘NA’ if not available                |
++----------------------------------+------------------------------------------------------------------------------------------------------+
+| P                                | *P-value* of test statistic – ‘NA’ if not available                                                  |
++----------------------------------+------------------------------------------------------------------------------------------------------+
+| N                                | Sample size                                                                                          |
++----------------------------------+------------------------------------------------------------------------------------------------------+
+| INFO                             | Imputation accuracy for imputed SNPs                                                                 |
++----------------------------------+------------------------------------------------------------------------------------------------------+
+| HWE_PVAL                         | HWE P-value for genotyped SNPs                                                                       |
++----------------------------------+------------------------------------------------------------------------------------------------------+
+| CALLRATE                         | Genotyping call rate for genotyped SNPs                                                              |
++----------------------------------+------------------------------------------------------------------------------------------------------+
+
+Most of it is already saved by BOLT-LMM. I add
+
+-   sample size (extracting it from BOLT-LMM log file, since final sample size was slightly smaller than 8731 individuals)
+-   imputation score (extracting R2 from .info.gz files downloaded from the Michigan Imputation Server 2)
+-   HWE p-values and call-rates (after running corresponding PLINK2 commands on clean genotyped data).
+
+The output is saved in
+
+```{r}
+list.files('01_Data', 'METADAC.*association.*', full.names = TRUE, recursive = TRUE) |> cat(sep = '\n')
+```
+
+# References {#refs}
